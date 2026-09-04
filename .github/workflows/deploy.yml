@@ -8,15 +8,18 @@ on:
   schedule:
     # Refresh the EDINET filings snapshot once a day. Unlike a live
     # disclosure feed, nothing here needs minute-level freshness — filing
-    # metadata for a wide (400-day) window is cheap, but the business-
-    # description pass re-downloads a CSV package for every listed
-    # company's latest 有価証券報告書 (~4,000 documents) on every run (see
-    # scripts/fetch-edinet.ts), which is too much load to repeat more than
-    # about once a day.
+    # metadata for a wide (400-day) window is cheap, and the business-
+    # description pass (see scripts/fetch-edinet.ts) only re-downloads a
+    # CSV package for companies whose most recent 有価証券報告書 isn't
+    # already in data/business-descriptions.json, so a daily cadence is
+    # more than enough even once that cache is warm.
     - cron: "0 21 * * 1-5"
 
 permissions:
-  contents: read
+  # write is needed so the build job can commit data/business-descriptions.json
+  # (the cross-run business-description cache — see scripts/fetch-edinet.ts)
+  # back to the repo.
+  contents: write
   pages: write
   id-token: write
 
@@ -40,6 +43,21 @@ jobs:
         run: npx tsx scripts/fetch-edinet.ts
         env:
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+      - name: Commit updated business-description cache
+        # [skip ci] keeps this push from re-triggering this same workflow's
+        # `push: branches: [main]` rule — the schedule/workflow_dispatch
+        # triggers below aren't tied to a specific commit, so they're
+        # unaffected and still run as normal.
+        run: |
+          if ! git diff --quiet -- data/business-descriptions.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/business-descriptions.json
+            git commit -m "Update business-description cache [skip ci]"
+            git push
+          else
+            echo "No change to data/business-descriptions.json, nothing to commit."
+          fi
       - name: Build static export
         run: npm run build
         env:

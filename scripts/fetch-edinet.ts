@@ -20,9 +20,9 @@
  * 有価証券報告書 a year, but on a date that depends on its own fiscal
  * year end, so covering "every currently-listed company's latest annual
  * report" means covering a full year of filing dates, not just the last
- * few weeks. Every run rebuilds the snapshot from scratch (there is no
- * cross-run cache — see below), so this window is what "全上場企業"
- * actually means in practice here.
+ * few weeks. The filing *list* itself is always rebuilt from scratch over
+ * this window (see below for what is cached across runs), so this window
+ * is what "全上場企業" actually means in practice here.
  *
  * Financial figures and the "事業の内容" business-description text (see
  * src/lib/edinetFinancials.ts) are both separate, much heavier fetches per
@@ -34,21 +34,30 @@
  *   days, cheap enough to repeat every run.
  * - The business description only covers each company's single most
  *   recent 有価証券報告書 (docTypeCode "120") within the DAYS window —
- *   effectively one document per currently-listed company (~4,000) — since
- *   a company's business description is what matters for search, not its
- *   full filing history.
+ *   effectively one document per currently-listed company (~4,000). These
+ *   are cached across runs in BUSINESS_DESCRIPTION_CACHE_PATH (see
+ *   loadBusinessDescriptionCache/attachBusinessDescriptions below), keyed
+ *   by docId: once a specific filing's description has been fetched, it
+ *   never needs fetching again, since a published filing's text doesn't
+ *   change — only a *new* filing (next year's annual report, a new docId)
+ *   does. So after the first run backfills the cache, later runs only
+ *   fetch the handful of companies that filed a new 有価証券報告書 since
+ *   the last run, not all ~4,000 every time. This is also why
+ *   BUSINESS_DESCRIPTION_CONCURRENCY was lowered from an earlier value of
+ *   10 to 3 — even a modest daily trickle of new filings hit EDINET's rate
+ *   limit (HTTP 200 responses reporting StatusCode 429) at higher
+ *   concurrency; see fetchDocumentCsvZip's retry-with-backoff in
+ *   src/lib/edinet.ts for the other half of that fix. The cache is
+ *   committed back to the repo by deploy.yml (requires `contents: write`),
+ *   pruned each run to just the docIds this run's targets need so it
+ *   doesn't grow unboundedly as companies delist or file new reports.
  *
- * Even bounded that way, ~4,000 extra downloads is real load, both on
- * EDINET and on this workflow's run time — acceptable for a schedule that
- * runs once a day (see deploy.yml's cron), not something that should run
- * every few minutes. A persisted cross-run cache would let this narrow
- * back down to "only new/changed companies since last time" regardless of
- * schedule, but means committing generated data back to the repo (the
- * workflow would need `contents: write`), which is a bigger change than
- * this feature warrants for now — this whole file trades some repeated
- * work for staying simple and stateless.
+ * The filing list itself (DAYS-day window) is still rebuilt from scratch
+ * every run — it's cheap (metadata only) and doing so keeps withdrawn/
+ * corrected filings and newly-appeared ones accurate without needing any
+ * cache invalidation logic of its own.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   fetchBusinessDescriptionForFiling,
@@ -69,6 +78,10 @@ const FINANCIALS_CONCURRENCY = 5;
 // per-request retry with backoff handles the rest.
 const BUSINESS_DESCRIPTION_CONCURRENCY = 3;
 const ANNUAL_REPORT_DOC_TYPE_CODE = "120"; // 有価証券報告書 (not its 訂正/quarterly/half-year siblings)
+
+// Cross-run cache of docId -> businessDescription, committed back to the
+// repo by deploy.yml. See the module comment above for why this exists.
+const BUSINESS_DESCRIPTION_CACHE_PATH = path.join(process.cwd(), "data", "business-descriptions.json");
 
 // Logging a full warning (message + stack) for every single failure is
 // unreadable and, at business-description scale (~4,000 attempts), can
@@ -143,21 +156,57 @@ function latestAnnualReportPerCompany(filings: EdinetFiling[]): EdinetFiling[] {
   return Array.from(latestByCode.values());
 }
 
+function loadBusinessDescriptionCache(): Record<string, string> {
+  if (!existsSync(BUSINESS_DESCRIPTION_CACHE_PATH)) return {};
+  try {
+    return JSON.parse(readFileSync(BUSINESS_DESCRIPTION_CACHE_PATH, "utf-8")) as Record<string, string>;
+  } catch (err) {
+    console.warn(`Failed to parse ${BUSINESS_DESCRIPTION_CACHE_PATH}, starting with an empty cache:`, err);
+    return {};
+  }
+}
+
 async function attachBusinessDescriptions(filings: EdinetFiling[]): Promise<EdinetFiling[]> {
   const targets = latestAnnualReportPerCompany(filings);
   if (targets.length === 0) return filings;
 
+  const cache = loadBusinessDescriptionCache();
+  const uncached = targets.filter((f) => !(f.docId in cache));
+
   console.log(
-    `Extracting business descriptions for each company's most recent 有価証券報告書 (${targets.length} companies)...`
+    `Business descriptions for ${targets.length} companies' most recent 有価証券報告書: ` +
+      `${targets.length - uncached.length} already cached, fetching ${uncached.length} new/changed...`
   );
 
-  const results = await mapWithConcurrency(targets, BUSINESS_DESCRIPTION_CONCURRENCY, (filing) =>
-    fetchBusinessDescriptionForFiling(filing.docId)
+  let result = filings;
+  if (uncached.length > 0) {
+    const results = await mapWithConcurrency(uncached, BUSINESS_DESCRIPTION_CONCURRENCY, (filing) =>
+      fetchBusinessDescriptionForFiling(filing.docId)
+    );
+    result = applyResults(result, uncached, results, "business description", (filing, description) => {
+      if (description) cache[filing.docId] = description;
+      return description ? { ...filing, businessDescription: description } : filing;
+    });
+  }
+
+  // Apply cached descriptions (including ones just fetched above) to every
+  // target, then persist the cache pruned down to just this run's targets —
+  // a docId from a company's now-superseded prior-year annual report isn't
+  // useful once this year's has been fetched, so dropping it keeps the
+  // cache file bounded by "currently listed companies" rather than growing
+  // forever.
+  result = result.map((f) =>
+    cache[f.docId] && !f.businessDescription ? { ...f, businessDescription: cache[f.docId] } : f
   );
 
-  return applyResults(filings, targets, results, "business description", (filing, description) =>
-    description ? { ...filing, businessDescription: description } : filing
-  );
+  const pruned: Record<string, string> = {};
+  for (const filing of targets) {
+    if (cache[filing.docId]) pruned[filing.docId] = cache[filing.docId];
+  }
+  mkdirSync(path.dirname(BUSINESS_DESCRIPTION_CACHE_PATH), { recursive: true });
+  writeFileSync(BUSINESS_DESCRIPTION_CACHE_PATH, JSON.stringify(pruned));
+
+  return result;
 }
 
 async function main() {
