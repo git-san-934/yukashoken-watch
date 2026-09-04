@@ -61,7 +61,13 @@ import {
 const DAYS = 400;
 const FINANCIALS_DAYS = 3;
 const FINANCIALS_CONCURRENCY = 5;
-const BUSINESS_DESCRIPTION_CONCURRENCY = 10;
+// A run at concurrency 10 across ~3,800 documents measurably tripped
+// EDINET's rate limit (HTTP 200 bodies reporting StatusCode 429 — see
+// fetchDocumentCsvZip's retry logic in src/lib/edinet.ts), causing roughly
+// half of business-description extractions to fail. Lowering concurrency
+// here reduces how often that limit gets hit in the first place; the
+// per-request retry with backoff handles the rest.
+const BUSINESS_DESCRIPTION_CONCURRENCY = 3;
 const ANNUAL_REPORT_DOC_TYPE_CODE = "120"; // 有価証券報告書 (not its 訂正/quarterly/half-year siblings)
 
 // Logging a full warning (message + stack) for every single failure is

@@ -159,6 +159,30 @@ export interface FetchEdinetOptions {
   apiKey?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Only used by fetchDocumentCsvZip's rate-limit retry. Defaults to 5. */
+  maxRetries?: number;
+  /** Only used by fetchDocumentCsvZip's rate-limit retry. Defaults to 3000 (doubles each attempt). */
+  retryDelayMs?: number;
+}
+
+/**
+ * EDINET signals "too many requests" as an HTTP **200** whose body is
+ * `{"StatusCode":"429","message":"Too Many Requests"}` — a real 429/503
+ * would be caught by `!res.ok` above, but this one isn't, so it has to be
+ * detected from the body itself. Confirmed against production logs: under
+ * sustained concurrency-10 load across ~3,800 documents, this was the
+ * dominant cause of business-description extraction failures (see
+ * scripts/fetch-edinet.ts's BUSINESS_DESCRIPTION_CONCURRENCY).
+ */
+class EdinetRateLimitError extends Error {
+  constructor(docId: string) {
+    super(`EDINET rate limit hit for ${docId} (HTTP 200 body reported StatusCode 429)`);
+    this.name = "EdinetRateLimitError";
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function fetchFilingsForDate(
@@ -197,10 +221,9 @@ export async function fetchFilingsForDate(
   }
 }
 
-/** Downloads an EDINET filing's CSV package (書類取得API type=5) as raw bytes. */
-export async function fetchDocumentCsvZip(
+async function fetchDocumentCsvZipOnce(
   docId: string,
-  options: FetchEdinetOptions = {}
+  options: FetchEdinetOptions
 ): Promise<Uint8Array> {
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -231,10 +254,22 @@ export async function fetchDocumentCsvZip(
     const looksLikeZip = bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b; // "PK"
     if (!looksLikeZip) {
       const contentType = res.headers.get("content-type") ?? "(no content-type)";
-      const preview = new TextDecoder("utf-8", { fatal: false })
-        .decode(bytes.slice(0, 200))
-        .replace(/\s+/g, " ")
-        .trim();
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+
+      if (contentType.includes("json")) {
+        try {
+          const parsed = JSON.parse(text) as { StatusCode?: string; metadata?: { status?: string } };
+          if (parsed.StatusCode === "429" || parsed.metadata?.status === "429") {
+            throw new EdinetRateLimitError(docId);
+          }
+        } catch (err) {
+          if (err instanceof EdinetRateLimitError) throw err;
+          // Not parseable JSON despite the content-type — fall through to
+          // the generic diagnostic error below.
+        }
+      }
+
+      const preview = text.replace(/\s+/g, " ").trim().slice(0, 200);
       throw new Error(
         `EDINET document response for ${docId} doesn't look like a zip file ` +
           `(content-type: ${contentType}, ${bytes.length} bytes, starts with: "${preview}")`
@@ -244,6 +279,32 @@ export async function fetchDocumentCsvZip(
     return bytes;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+/**
+ * Downloads an EDINET filing's CSV package (書類取得API type=5) as raw
+ * bytes, retrying with exponential backoff when EDINET reports a rate limit
+ * (see EdinetRateLimitError above). Other failures (a genuine 404 for a
+ * document with no CSV package, a network error, etc.) are not retried —
+ * they won't resolve by waiting.
+ */
+export async function fetchDocumentCsvZip(
+  docId: string,
+  options: FetchEdinetOptions = {}
+): Promise<Uint8Array> {
+  const maxRetries = options.maxRetries ?? 5;
+  const retryDelayMs = options.retryDelayMs ?? 3000;
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchDocumentCsvZipOnce(docId, options);
+    } catch (err) {
+      if (!(err instanceof EdinetRateLimitError) || attempt >= maxRetries) {
+        throw err;
+      }
+      await sleep(retryDelayMs * 2 ** attempt);
+    }
   }
 }
 

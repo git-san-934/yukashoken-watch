@@ -218,6 +218,54 @@ describe("fetchDocumentCsvZip", () => {
       fetchDocumentCsvZip("S100AAAA", { apiKey: "key", fetchImpl })
     ).rejects.toThrow(/text\/html[\s\S]*Too many requests/);
   });
+
+  it("retries with backoff on EDINET's HTTP-200-wrapped 429, then succeeds", async () => {
+    const zipBytes = zipSync({ "sample.csv": new Uint8Array([1, 2, 3]) });
+    const rateLimited = () =>
+      new Response(JSON.stringify({ StatusCode: "429", message: "Too Many Requests" }), {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(rateLimited())
+      .mockResolvedValueOnce(rateLimited())
+      .mockResolvedValueOnce(new Response(zipBytes, { status: 200 }));
+
+    const result = await fetchDocumentCsvZip("S100AAAA", { apiKey: "key", fetchImpl, retryDelayMs: 0 });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(new Uint8Array(result)).toEqual(zipBytes);
+  });
+
+  it("gives up after maxRetries of a persistent 429", async () => {
+    const fetchImpl = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ StatusCode: "429", message: "Too Many Requests" }), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        })
+    );
+
+    await expect(
+      fetchDocumentCsvZip("S100AAAA", { apiKey: "key", fetchImpl, retryDelayMs: 0, maxRetries: 2 })
+    ).rejects.toThrow(/rate limit/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(3); // initial attempt + 2 retries
+  });
+
+  it("does not retry a genuine 404 (a real document-not-found, not a rate limit)", async () => {
+    const fetchImpl = vi.fn().mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({ metadata: { title: "提出された書類を取得するためのAPI", status: "404", message: "Not Found" } }),
+          { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+        )
+    );
+
+    await expect(
+      fetchDocumentCsvZip("S100AAAA", { apiKey: "key", fetchImpl, retryDelayMs: 0 })
+    ).rejects.toThrow(/doesn't look like a zip file/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("fetchFinancialsForFiling", () => {
