@@ -1,11 +1,13 @@
 import { zipSync } from "fflate";
 import { describe, expect, it, vi } from "vitest";
 import {
+  fetchBusinessDescriptionForFiling,
   fetchDocumentCsvZip,
   fetchEdinetFilingsSnapshot,
   fetchFilingsForDate,
   fetchFinancialsForFiling,
   fetchRecentFilings,
+  mapWithConcurrency,
   normalizeSecCode,
   searchFilings,
 } from "@/lib/edinet";
@@ -254,6 +256,81 @@ describe("fetchFinancialsForFiling", () => {
   });
 });
 
+describe("fetchBusinessDescriptionForFiling", () => {
+  it("downloads and parses the business description text from the CSV package", async () => {
+    const header = [
+      "要素ID",
+      "項目名",
+      "コンテキストID",
+      "相対年度",
+      "連結・個別",
+      "期間・時点",
+      "ユニットID",
+      "単位",
+      "値",
+    ];
+    const row = [
+      "jpcrp_cor:DescriptionOfBusinessTextBlock",
+      "事業の内容",
+      "CurrentYearInstant",
+      "当期",
+      "連結",
+      "時点",
+      "",
+      "",
+      "<p>半導体の製造・販売を行っています。</p>",
+    ];
+    const quote = (fields: string[]) => fields.map((f) => `"${f}"`).join("\t");
+    const csvText = [quote(header), quote(row)].join("\r\n");
+    const csvBytes = new Uint8Array(Buffer.from(csvText, "utf16le"));
+    const zipBytes = zipSync({ "sample.csv": csvBytes });
+
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(zipBytes, { status: 200 }));
+    const result = await fetchBusinessDescriptionForFiling("S100AAAA", { apiKey: "key", fetchImpl });
+
+    expect(result).toBe("半導体の製造・販売を行っています。");
+  });
+
+  it("returns null when the filing has no business description element", async () => {
+    const zipBytes = zipSync({ "readme.txt": new Uint8Array() });
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(zipBytes, { status: 200 }));
+    const result = await fetchBusinessDescriptionForFiling("S100AAAA", { apiKey: "key", fetchImpl });
+    expect(result).toBeNull();
+  });
+});
+
+describe("mapWithConcurrency", () => {
+  it("resolves every item, reporting failures per-item instead of rejecting the whole batch", async () => {
+    const results = await mapWithConcurrency(
+      [1, 2, 3, 4],
+      2,
+      async (n) => {
+        if (n === 3) throw new Error("boom");
+        return n * 10;
+      }
+    );
+
+    expect(results).toEqual([
+      { status: "fulfilled", value: 10 },
+      { status: "fulfilled", value: 20 },
+      { status: "rejected", reason: new Error("boom") },
+      { status: "fulfilled", value: 40 },
+    ]);
+  });
+
+  it("never runs more than `limit` items concurrently", async () => {
+    let active = 0;
+    let maxActive = 0;
+    await mapWithConcurrency(Array.from({ length: 10 }, (_, i) => i), 3, async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+    });
+    expect(maxActive).toBeLessThanOrEqual(3);
+  });
+});
+
 describe("searchFilings", () => {
   const filings = [
     {
@@ -295,6 +372,16 @@ describe("searchFilings", () => {
   it("matches by company name (substring, case-insensitive)", () => {
     expect(searchFilings(filings, "トヨタ")).toEqual([filings[0]]);
     expect(searchFilings(filings, "非上場")).toEqual([filings[1]]);
+  });
+
+  it("matches by business description text when present", () => {
+    const withDescriptions = [
+      { ...filings[0], businessDescription: "半導体・GPUの製造販売" },
+      { ...filings[1], businessDescription: "ドローンの開発" },
+    ];
+    expect(searchFilings(withDescriptions, "GPU")).toEqual([withDescriptions[0]]);
+    expect(searchFilings(withDescriptions, "ドローン")).toEqual([withDescriptions[1]]);
+    expect(searchFilings(withDescriptions, "光半導体")).toEqual([]);
   });
 });
 

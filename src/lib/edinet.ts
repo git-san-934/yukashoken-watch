@@ -23,15 +23,20 @@
  * rather than throwing.
  *
  * Filing metadata (who filed what, for which period, when) is fetched
- * eagerly for every matching filer (see fetchRecentFilings). The
- * financial figures inside each filing are a separate, heavier fetch —
- * downloading and unzipping a CSV package per document (see
- * fetchFinancialsForFiling / edinetFinancials.ts) — so scripts/fetch-
- * edinet.ts only does that for recently-submitted filings, not the full
- * metadata window; see that script for why.
+ * eagerly for every matching filer (see fetchRecentFilings). Both the
+ * financial highlights and the "事業の内容" business-description text
+ * inside a filing are separate, heavier fetches — downloading and
+ * unzipping a CSV package per document (see fetchFinancialsForFiling and
+ * fetchBusinessDescriptionForFiling / edinetFinancials.ts) — so
+ * scripts/fetch-edinet.ts is selective about which filings it tries that
+ * for; see that script for the reasoning.
  */
 
-import { extractFinancialsFromZip, type FinancialPeriod } from "./edinetFinancials";
+import {
+  extractBusinessDescriptionFromZip,
+  extractFinancialsFromZip,
+  type FinancialPeriod,
+} from "./edinetFinancials";
 
 export type { FinancialPeriod } from "./edinetFinancials";
 
@@ -54,6 +59,13 @@ export interface EdinetFiling {
    * otherwise; never an empty array.
    */
   financials?: FinancialPeriod[];
+  /**
+   * The filer's "事業の内容" (description of business) text, if
+   * scripts/fetch-edinet.ts attempted and succeeded at that for this
+   * filing. Only attempted for each company's single most recent 有価証券
+   * 報告書 (see that script), so this is absent on every other filing.
+   */
+  businessDescription?: string;
 }
 
 const DEFAULT_BASE_URL = "https://api.edinet-fsa.go.jp/api/v2";
@@ -223,6 +235,50 @@ export async function fetchFinancialsForFiling(
   return extractFinancialsFromZip(zipBytes);
 }
 
+/** Downloads and parses one filing's "事業の内容" text. See edinetFinancials.ts. */
+export async function fetchBusinessDescriptionForFiling(
+  docId: string,
+  options: FetchEdinetOptions = {}
+): Promise<string | null> {
+  const zipBytes = await fetchDocumentCsvZip(docId, options);
+  return extractBusinessDescriptionFromZip(zipBytes);
+}
+
+/**
+ * Runs `fn` over `items` with at most `limit` in flight at once, resolving
+ * once every item has settled (never rejects itself — failures are
+ * reported per-item, same shape as Promise.allSettled). Used to bound how
+ * many concurrent requests this module ever makes to EDINET at once,
+ * whether that's dozens of date-list lookups or thousands of per-document
+ * downloads (see scripts/fetch-edinet.ts).
+ */
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i]) };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+// How many /documents.json date-list requests to have in flight at once.
+// These are cheap (metadata only), but a wide DAYS window (see
+// scripts/fetch-edinet.ts) can mean hundreds of them — bounding this keeps
+// that from turning into hundreds of simultaneous connections.
+const LIST_FETCH_CONCURRENCY = 10;
+
 export async function fetchRecentFilings(
   days: number,
   options: FetchEdinetOptions = {}
@@ -234,8 +290,8 @@ export async function fetchRecentFilings(
     return d;
   });
 
-  const results = await Promise.allSettled(
-    dates.map((date) => fetchFilingsForDate(date, options))
+  const results = await mapWithConcurrency(dates, LIST_FETCH_CONCURRENCY, (date) =>
+    fetchFilingsForDate(date, options)
   );
 
   if (results.every((r) => r.status === "rejected")) {
@@ -288,9 +344,11 @@ export async function fetchEdinetFilingsSnapshot(
 
 /**
  * Filters filings by a free-text query, matched against the company name
- * (substring, case-insensitive) or the ticker code (prefix match against
- * the normalized 4-character code). An empty/whitespace-only query
- * matches everything, so this doubles as the "no filter" case.
+ * (substring, case-insensitive), the ticker code (prefix match against the
+ * normalized 4-character code), or the business description text when
+ * present (substring, case-insensitive — e.g. "GPU", "ドローン"). An
+ * empty/whitespace-only query matches everything, so this doubles as the
+ * "no filter" case.
  */
 export function searchFilings(filings: EdinetFiling[], query: string): EdinetFiling[] {
   const trimmed = query.trim();
@@ -301,6 +359,9 @@ export function searchFilings(filings: EdinetFiling[], query: string): EdinetFil
 
   return filings.filter((f) => {
     if (f.filerName.toLowerCase().includes(lowerQuery)) return true;
-    return normalizedCode.length > 0 && f.secCode !== null && f.secCode.startsWith(normalizedCode);
+    if (normalizedCode.length > 0 && f.secCode !== null && f.secCode.startsWith(normalizedCode)) {
+      return true;
+    }
+    return f.businessDescription !== undefined && f.businessDescription.toLowerCase().includes(lowerQuery);
   });
 }

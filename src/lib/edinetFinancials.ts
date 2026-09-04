@@ -166,3 +166,67 @@ export function extractFinancialsFromZip(zipBytes: Uint8Array): FinancialPeriod[
   }
   return results;
 }
+
+// Matched by suffix, same reasoning as METRIC_ELEMENT_SUFFIXES above.
+const BUSINESS_DESCRIPTION_ELEMENT_SUFFIX = "DescriptionOfBusinessTextBlock";
+
+// Bounds how much text ends up in the public snapshot per company — a
+// business description is normally a few paragraphs, so this is generous
+// headroom, not a tight limit.
+const MAX_BUSINESS_DESCRIPTION_LENGTH = 2000;
+
+// XBRL "TextBlock" elements conventionally hold their content as HTML
+// (headings, paragraphs, tables), which isn't useful for plain-text search
+// or display here — strip tags and decode the handful of entities EDINET's
+// own XBRL is known to use, then collapse whitespace left behind by that.
+function stripHtml(raw: string): string {
+  return raw
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractBusinessDescriptionFromCsvText(text: string): string | null {
+  const rows = parseCsvRows(text);
+  for (const row of rows) {
+    const elementId = row["要素ID"];
+    const rawValue = row["値"];
+    if (!elementId || !rawValue) continue;
+    if (!elementId.endsWith(BUSINESS_DESCRIPTION_ELEMENT_SUFFIX)) continue;
+
+    const cleaned = stripHtml(rawValue);
+    if (!cleaned) continue;
+    return cleaned.length > MAX_BUSINESS_DESCRIPTION_LENGTH
+      ? `${cleaned.slice(0, MAX_BUSINESS_DESCRIPTION_LENGTH)}…`
+      : cleaned;
+  }
+  return null;
+}
+
+/**
+ * Extracts the free-text "事業の内容" (description of business) section
+ * from an EDINET filing's CSV package, when present. Unlike the numeric
+ * highlights above, this is a single free-text value (an XBRL "TextBlock"
+ * element) rather than a per-period table — a 有価証券報告書 normally
+ * carries exactly one. Returns null if no such element is found (e.g. in
+ * document types that don't carry this section).
+ */
+export function extractBusinessDescriptionFromZip(zipBytes: Uint8Array): string | null {
+  const files = unzipSync(zipBytes);
+  for (const [name, bytes] of Object.entries(files)) {
+    if (!name.toLowerCase().endsWith(".csv")) continue;
+    try {
+      const description = extractBusinessDescriptionFromCsvText(decodeCsvText(bytes));
+      if (description) return description;
+    } catch {
+      // Skip a file we can't read rather than failing the whole document.
+    }
+  }
+  return null;
+}

@@ -1,6 +1,6 @@
 import { zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { extractFinancialsFromZip } from "@/lib/edinetFinancials";
+import { extractBusinessDescriptionFromZip, extractFinancialsFromZip } from "@/lib/edinetFinancials";
 
 const HEADER = [
   "要素ID",
@@ -158,5 +158,72 @@ describe("extractFinancialsFromZip", () => {
 
   it("ignores non-csv files and doesn't throw on an empty zip", () => {
     expect(extractFinancialsFromZip(buildZip({ "readme.txt": new Uint8Array() }))).toEqual([]);
+  });
+});
+
+describe("extractBusinessDescriptionFromZip", () => {
+  it("extracts and strips HTML markup from the business description text block", () => {
+    const csv = buildCsv([
+      [
+        "jpcrp_cor:DescriptionOfBusinessTextBlock",
+        "事業の内容",
+        "CurrentYearInstant",
+        "当期",
+        "連結",
+        "時点",
+        "",
+        "",
+        "<p>当社グループは<b>GPU</b>および半導体の開発を行っています。</p>&nbsp;<p>また、ドローン事業にも参入しています。</p>",
+      ],
+    ]);
+    const zip = buildZip({ "sample.csv": csv });
+    const result = extractBusinessDescriptionFromZip(zip);
+    expect(result).toBe(
+      "当社グループは GPU および半導体の開発を行っています。 また、ドローン事業にも参入しています。"
+    );
+  });
+
+  it("returns null when no matching element is present", () => {
+    const csv = buildCsv([
+      [
+        "jpcrp_cor:NetSalesSummaryOfBusinessResults",
+        "売上高",
+        "CurrentYearDuration",
+        "当期",
+        "連結",
+        "期間",
+        "unit1",
+        "JPY",
+        "1000000",
+      ],
+    ]);
+    const zip = buildZip({ "sample.csv": csv });
+    expect(extractBusinessDescriptionFromZip(zip)).toBeNull();
+  });
+
+  it("truncates very long descriptions", () => {
+    const longText = "あ".repeat(3000);
+    const csv = buildCsv([
+      [
+        "jpcrp_cor:DescriptionOfBusinessTextBlock",
+        "事業の内容",
+        "CurrentYearInstant",
+        "当期",
+        "連結",
+        "時点",
+        "",
+        "",
+        longText,
+      ],
+    ]);
+    const zip = buildZip({ "sample.csv": csv });
+    const result = extractBusinessDescriptionFromZip(zip);
+    expect(result).not.toBeNull();
+    expect(result!.length).toBe(2001); // 2000 chars + the "…" truncation marker
+    expect(result!.endsWith("…")).toBe(true);
+  });
+
+  it("returns null instead of throwing on an empty zip", () => {
+    expect(extractBusinessDescriptionFromZip(buildZip({ "readme.txt": new Uint8Array() }))).toBeNull();
   });
 });

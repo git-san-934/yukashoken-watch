@@ -3,10 +3,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchEdinetFilingsSnapshot, searchFilings, type EdinetFiling } from "@/lib/edinet";
 
-// The server-side snapshot refreshes every 15 min (see
-// .github/workflows/deploy.yml); poll a bit more often than that so an
-// open tab picks up a new snapshot soon after it's published.
-const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+// The server-side snapshot refreshes once a day (see
+// .github/workflows/deploy.yml — the business-description backfill this
+// covers is too heavy to run more often than that), so there's no benefit
+// to polling more often than this; it just picks up a fresh snapshot for
+// a tab left open across that daily refresh.
+const AUTO_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+
+// How much of a matched business description to show inline per filing —
+// enough to show why it matched a search, not the whole thing.
+const BUSINESS_DESCRIPTION_PREVIEW_LENGTH = 160;
 
 // Rendering every filing in a 1600+-item snapshot at once is wasteful —
 // cap the DOM to a reasonable page size. Narrowing the search query is
@@ -86,7 +92,7 @@ export default function Dashboard() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Yukashoken Watch</h1>
         <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          EDINET(金融庁)に提出された全上場企業の有価証券報告書・四半期報告書・半期報告書を確認できます。会社名または証券コードで絞り込めます。
+          EDINET(金融庁)に提出された全上場企業の有価証券報告書・四半期報告書・半期報告書を確認できます。会社名・証券コードに加えて、各社の最新の有価証券報告書に記載された【事業の内容】のテキストからも検索できます。
         </p>
       </header>
 
@@ -95,7 +101,7 @@ export default function Dashboard() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="会社名または証券コードで検索 (例: トヨタ / 7203)"
+            placeholder="会社名・証券コード・事業内容で検索 (例: トヨタ / 7203 / GPU / ドローン)"
             className="w-full max-w-sm rounded-md border border-zinc-300 bg-transparent px-3 py-1.5 text-sm dark:border-zinc-700"
           />
           <button
@@ -147,6 +153,14 @@ export default function Dashboard() {
                 </div>
                 {f.docDescription && (
                   <p className="text-sm font-medium">{f.docDescription}</p>
+                )}
+                {f.businessDescription && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    【事業の内容】
+                    {f.businessDescription.length > BUSINESS_DESCRIPTION_PREVIEW_LENGTH
+                      ? `${f.businessDescription.slice(0, BUSINESS_DESCRIPTION_PREVIEW_LENGTH)}…`
+                      : f.businessDescription}
+                  </p>
                 )}
                 {f.financials && f.financials.length > 0 && (
                   <div className="mt-1 overflow-x-auto">

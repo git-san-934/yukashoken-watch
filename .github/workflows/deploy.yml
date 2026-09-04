@@ -6,8 +6,14 @@ on:
       - main
   workflow_dispatch:
   schedule:
-    # Refresh the EDINET filings snapshot periodically.
-    - cron: "*/15 * * * 1-5"
+    # Refresh the EDINET filings snapshot once a day. Unlike a live
+    # disclosure feed, nothing here needs minute-level freshness — filing
+    # metadata for a wide (400-day) window is cheap, but the business-
+    # description pass re-downloads a CSV package for every listed
+    # company's latest 有価証券報告書 (~4,000 documents) on every run (see
+    # scripts/fetch-edinet.ts), which is too much load to repeat more than
+    # about once a day.
+    - cron: "0 21 * * 1-5"
 
 permissions:
   contents: read
