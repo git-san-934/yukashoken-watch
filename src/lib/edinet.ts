@@ -129,6 +129,19 @@ export function normalizeSecCode(secCode: string | null | undefined): string | n
   return normalized.length === 4 ? normalized : null;
 }
 
+/**
+ * The public, no-API-key URL for a filing's PDF on EDINET's own disclosure
+ * site (disclosure2dl.edinet-fsa.go.jp — a static-file host, separate from
+ * the authenticated api.edinet-fsa.go.jp used elsewhere in this file).
+ * Anyone can view/download a filing's PDF at this URL in a browser; it's
+ * how EDINET's own search results link out to documents. Not every filing
+ * necessarily has a PDF at this exact path (a very small number of doc
+ * types don't), so a 404 here is possible but rare.
+ */
+export function edinetDocumentPdfUrl(docId: string): string {
+  return `https://disclosure2dl.edinet-fsa.go.jp/searchdocument/pdf/${docId}.pdf`;
+}
+
 function normalizeDoc(raw: RawEdinetDoc): EdinetFiling | null {
   const docId = raw.docID;
   const docTypeCode = raw.docTypeCode;

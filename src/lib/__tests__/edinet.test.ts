@@ -1,6 +1,7 @@
 import { zipSync } from "fflate";
 import { describe, expect, it, vi } from "vitest";
 import {
+  edinetDocumentPdfUrl,
   fetchBusinessDescriptionForFiling,
   fetchDocumentCsvZip,
   fetchEdinetFilingsSnapshot,
@@ -29,6 +30,14 @@ describe("normalizeSecCode", () => {
     expect(normalizeSecCode(undefined)).toBeNull();
     expect(normalizeSecCode("")).toBeNull();
     expect(normalizeSecCode("12")).toBeNull();
+  });
+});
+
+describe("edinetDocumentPdfUrl", () => {
+  it("builds the public, no-API-key PDF URL from a docId", () => {
+    expect(edinetDocumentPdfUrl("S100W5IE")).toBe(
+      "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/pdf/S100W5IE.pdf"
+    );
   });
 });
 

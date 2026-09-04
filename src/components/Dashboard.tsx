@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchEdinetFilingsSnapshot, searchFilings, type EdinetFiling } from "@/lib/edinet";
+import { edinetDocumentPdfUrl, fetchEdinetFilingsSnapshot, searchFilings, type EdinetFiling } from "@/lib/edinet";
 
 // The server-side snapshot refreshes once a day (see
 // .github/workflows/deploy.yml — the business-description backfill this
@@ -151,9 +151,17 @@ export default function Dashboard() {
                   )}
                   <span>{formatDate(f.submittedAt)}</span>
                 </div>
-                {f.docDescription && (
-                  <p className="text-sm font-medium">{f.docDescription}</p>
-                )}
+                <p className="text-sm font-medium">
+                  {f.docDescription && <span>{f.docDescription} </span>}
+                  <a
+                    href={edinetDocumentPdfUrl(f.docId)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-normal text-blue-600 underline decoration-blue-600/30 underline-offset-2 hover:decoration-blue-600 dark:text-blue-400 dark:decoration-blue-400/30 dark:hover:decoration-blue-400"
+                  >
+                    PDFを見る
+                  </a>
+                </p>
                 {f.businessDescription && (
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
                     【事業の内容】
