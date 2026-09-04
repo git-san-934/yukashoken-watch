@@ -6,8 +6,8 @@ import {
   fetchFilingsForDate,
   fetchFinancialsForFiling,
   fetchRecentFilings,
-  filterFilingsByCodes,
   normalizeSecCode,
+  searchFilings,
 } from "@/lib/edinet";
 
 function jsonResponse(body: unknown, status = 200) {
@@ -254,37 +254,47 @@ describe("fetchFinancialsForFiling", () => {
   });
 });
 
-describe("filterFilingsByCodes", () => {
-  it("matches filings whose normalized secCode is in the watch list", () => {
-    const filings = [
-      {
-        docId: "1",
-        edinetCode: "E1",
-        secCode: "7203",
-        filerName: "トヨタ自動車株式会社",
-        docTypeCode: "120",
-        docTypeLabel: "有価証券報告書",
-        docDescription: null,
-        periodStart: null,
-        periodEnd: null,
-        submittedAt: "2026-06-27 15:00",
-      },
-      {
-        docId: "2",
-        edinetCode: "E2",
-        secCode: null,
-        filerName: "非上場会社",
-        docTypeCode: "120",
-        docTypeLabel: "有価証券報告書",
-        docDescription: null,
-        periodStart: null,
-        periodEnd: null,
-        submittedAt: "2026-06-27 15:00",
-      },
-    ];
+describe("searchFilings", () => {
+  const filings = [
+    {
+      docId: "1",
+      edinetCode: "E1",
+      secCode: "7203",
+      filerName: "トヨタ自動車株式会社",
+      docTypeCode: "120",
+      docTypeLabel: "有価証券報告書",
+      docDescription: null,
+      periodStart: null,
+      periodEnd: null,
+      submittedAt: "2026-06-27 15:00",
+    },
+    {
+      docId: "2",
+      edinetCode: "E2",
+      secCode: null,
+      filerName: "非上場会社",
+      docTypeCode: "120",
+      docTypeLabel: "有価証券報告書",
+      docDescription: null,
+      periodStart: null,
+      periodEnd: null,
+      submittedAt: "2026-06-27 15:00",
+    },
+  ];
 
-    expect(filterFilingsByCodes(filings, ["7203"])).toEqual([filings[0]]);
-    expect(filterFilingsByCodes(filings, ["9999"])).toEqual([]);
+  it("returns everything for an empty query", () => {
+    expect(searchFilings(filings, "")).toEqual(filings);
+    expect(searchFilings(filings, "   ")).toEqual(filings);
+  });
+
+  it("matches by ticker code (prefix, case-insensitive)", () => {
+    expect(searchFilings(filings, "7203")).toEqual([filings[0]]);
+    expect(searchFilings(filings, "9999")).toEqual([]);
+  });
+
+  it("matches by company name (substring, case-insensitive)", () => {
+    expect(searchFilings(filings, "トヨタ")).toEqual([filings[0]]);
+    expect(searchFilings(filings, "非上場")).toEqual([filings[1]]);
   });
 });
 

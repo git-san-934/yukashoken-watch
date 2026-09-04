@@ -286,10 +286,21 @@ export async function fetchEdinetFilingsSnapshot(
   return (await res.json()) as EdinetFilingsSnapshot;
 }
 
-export function filterFilingsByCodes(
-  filings: EdinetFiling[],
-  codes: string[]
-): EdinetFiling[] {
-  const wanted = new Set(codes.map(normalizeCode));
-  return filings.filter((f) => f.secCode !== null && wanted.has(f.secCode));
+/**
+ * Filters filings by a free-text query, matched against the company name
+ * (substring, case-insensitive) or the ticker code (prefix match against
+ * the normalized 4-character code). An empty/whitespace-only query
+ * matches everything, so this doubles as the "no filter" case.
+ */
+export function searchFilings(filings: EdinetFiling[], query: string): EdinetFiling[] {
+  const trimmed = query.trim();
+  if (!trimmed) return filings;
+
+  const lowerQuery = trimmed.toLowerCase();
+  const normalizedCode = normalizeCode(trimmed);
+
+  return filings.filter((f) => {
+    if (f.filerName.toLowerCase().includes(lowerQuery)) return true;
+    return normalizedCode.length > 0 && f.secCode !== null && f.secCode.startsWith(normalizedCode);
+  });
 }
