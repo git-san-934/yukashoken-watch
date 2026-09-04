@@ -64,6 +64,48 @@ const FINANCIALS_CONCURRENCY = 5;
 const BUSINESS_DESCRIPTION_CONCURRENCY = 10;
 const ANNUAL_REPORT_DOC_TYPE_CODE = "120"; // 有価証券報告書 (not its 訂正/quarterly/half-year siblings)
 
+// Logging a full warning (message + stack) for every single failure is
+// unreadable and, at business-description scale (~4,000 attempts), can
+// crowd the one-line success/failure summary below clean out of the log
+// output a viewer actually gets to see (GitHub's log UI and API both
+// truncate very long job logs) — so only the first few get the full
+// detail; the rest are just counted, and the summary line always prints
+// last, where it's guaranteed to survive.
+const MAX_DETAILED_FAILURE_LOGS = 10;
+
+/** Merges `results` (one per `targets`, in order) into `filings` via `apply`, logging capped detail plus a summary. */
+function applyResults<T>(
+  filings: EdinetFiling[],
+  targets: EdinetFiling[],
+  results: PromiseSettledResult<T>[],
+  label: string,
+  apply: (filing: EdinetFiling, value: T) => EdinetFiling
+): EdinetFiling[] {
+  const byDocId = new Map(filings.map((f) => [f.docId, f]));
+  let succeeded = 0;
+  let failed = 0;
+
+  targets.forEach((filing, i) => {
+    const result = results[i];
+    if (result.status === "fulfilled") {
+      succeeded += 1;
+      byDocId.set(filing.docId, apply(filing, result.value));
+    } else {
+      failed += 1;
+      if (failed <= MAX_DETAILED_FAILURE_LOGS) {
+        console.warn(`Failed to extract ${label} for ${filing.docId} (${filing.filerName}):`, result.reason);
+      }
+    }
+  });
+
+  if (failed > MAX_DETAILED_FAILURE_LOGS) {
+    console.warn(`(...and ${failed - MAX_DETAILED_FAILURE_LOGS} more ${label} failures, not logged individually)`);
+  }
+  console.log(`${label}: ${succeeded} succeeded, ${failed} failed, out of ${targets.length} attempted.`);
+
+  return filings.map((f) => byDocId.get(f.docId) ?? f);
+}
+
 async function attachRecentFinancials(filings: EdinetFiling[]): Promise<EdinetFiling[]> {
   const cutoff = Date.now() - FINANCIALS_DAYS * 24 * 60 * 60 * 1000;
   const recent = filings.filter((f) => new Date(f.submittedAt).getTime() >= cutoff);
@@ -73,23 +115,13 @@ async function attachRecentFinancials(filings: EdinetFiling[]): Promise<EdinetFi
     `Extracting financial highlights for ${recent.length} filing(s) from the last ${FINANCIALS_DAYS} day(s)...`
   );
 
-  const byDocId = new Map(filings.map((f) => [f.docId, f]));
   const results = await mapWithConcurrency(recent, FINANCIALS_CONCURRENCY, (filing) =>
     fetchFinancialsForFiling(filing.docId)
   );
 
-  recent.forEach((filing, i) => {
-    const result = results[i];
-    if (result.status === "fulfilled") {
-      if (result.value.length > 0) {
-        byDocId.set(filing.docId, { ...filing, financials: result.value });
-      }
-    } else {
-      console.warn(`Failed to extract financials for ${filing.docId} (${filing.filerName}):`, result.reason);
-    }
-  });
-
-  return filings.map((f) => byDocId.get(f.docId) ?? f);
+  return applyResults(filings, recent, results, "financial highlights", (filing, financials) =>
+    financials.length > 0 ? { ...filing, financials } : filing
+  );
 }
 
 /** Each listed company's single most recent 有価証券報告書, if any is in `filings`. */
@@ -113,26 +145,13 @@ async function attachBusinessDescriptions(filings: EdinetFiling[]): Promise<Edin
     `Extracting business descriptions for each company's most recent 有価証券報告書 (${targets.length} companies)...`
   );
 
-  const byDocId = new Map(filings.map((f) => [f.docId, f]));
   const results = await mapWithConcurrency(targets, BUSINESS_DESCRIPTION_CONCURRENCY, (filing) =>
     fetchBusinessDescriptionForFiling(filing.docId)
   );
 
-  targets.forEach((filing, i) => {
-    const result = results[i];
-    if (result.status === "fulfilled") {
-      if (result.value) {
-        byDocId.set(filing.docId, { ...filing, businessDescription: result.value });
-      }
-    } else {
-      console.warn(
-        `Failed to extract business description for ${filing.docId} (${filing.filerName}):`,
-        result.reason
-      );
-    }
-  });
-
-  return filings.map((f) => byDocId.get(f.docId) ?? f);
+  return applyResults(filings, targets, results, "business description", (filing, description) =>
+    description ? { ...filing, businessDescription: description } : filing
+  );
 }
 
 async function main() {

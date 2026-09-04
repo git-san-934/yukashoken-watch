@@ -206,6 +206,18 @@ describe("fetchDocumentCsvZip", () => {
       fetchDocumentCsvZip("S100AAAA", { apiKey: "key", fetchImpl })
     ).rejects.toThrow();
   });
+
+  it("throws a diagnostic error (not fflate's opaque one) when a 200 response isn't actually a zip", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response("<html><body>Too many requests</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      })
+    );
+    await expect(
+      fetchDocumentCsvZip("S100AAAA", { apiKey: "key", fetchImpl })
+    ).rejects.toThrow(/text\/html[\s\S]*Too many requests/);
+  });
 });
 
 describe("fetchFinancialsForFiling", () => {

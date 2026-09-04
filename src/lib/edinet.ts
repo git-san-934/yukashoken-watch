@@ -220,7 +220,28 @@ export async function fetchDocumentCsvZip(
     if (!res.ok) {
       throw new Error(`EDINET document download failed: ${res.status} ${res.statusText}`);
     }
-    return new Uint8Array(await res.arrayBuffer());
+    const bytes = new Uint8Array(await res.arrayBuffer());
+
+    // A 200 response isn't necessarily a real zip — some APIs return an
+    // HTML/JSON error or rate-limit notice with a 200 status. Check the
+    // zip magic bytes ("PK") ourselves so a bad body produces a diagnostic
+    // error here (with the response's own content-type and a text preview)
+    // instead of the opaque "invalid zip data" fflate throws later, deep
+    // inside extractFinancialsFromZip/extractBusinessDescriptionFromZip.
+    const looksLikeZip = bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b; // "PK"
+    if (!looksLikeZip) {
+      const contentType = res.headers.get("content-type") ?? "(no content-type)";
+      const preview = new TextDecoder("utf-8", { fatal: false })
+        .decode(bytes.slice(0, 200))
+        .replace(/\s+/g, " ")
+        .trim();
+      throw new Error(
+        `EDINET document response for ${docId} doesn't look like a zip file ` +
+          `(content-type: ${contentType}, ${bytes.length} bytes, starts with: "${preview}")`
+      );
+    }
+
+    return bytes;
   } finally {
     clearTimeout(timeout);
   }
